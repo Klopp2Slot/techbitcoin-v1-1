@@ -15,7 +15,7 @@ export async function cgGet<T>(path: string, searchParams?: Record<string, strin
       url.searchParams.set(k, String(v));
     }
   }
-  const res = await fetch(url.toString(), { headers(), cache: "no-store" });
+  const res = await fetch(url.toString(), { headers: headers(), cache: "no-store" });
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     throw new Error(`CoinGecko error ${res.status}: ${txt.slice(0, 200)}`);
