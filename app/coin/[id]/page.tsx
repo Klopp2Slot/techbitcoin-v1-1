@@ -158,9 +158,9 @@ export default async function CoinPage({ params }: { params: { id: string } }) {
           <div className="text-gray-400 text-sm">Price</div>
           <div className="text-2xl font-semibold">{formatUsd(md.current_price?.usd)}</div>
           <div className="mt-2 flex gap-4 text-sm">
-            <span className={pctClass(p1h)}>1h: {formatPct(p1h)}</span>
-            <span className={pctClass(p24h)}>24h: {formatPct(p24h)}</span>
-            <span className={pctClass(p7d)}>7d: {formatPct(p7d)}</span>
+<span className={pctClass(p1h)}>1h: {formatPct(p1h)?.text ?? "—"}</span>
+<span className={pctClass(p24h)}>24h: {formatPct(p24h)?.text ?? "—"}</span>
+<span className={pctClass(p7d)}>7d: {formatPct(p7d)?.text ?? "—"}</span>
           </div>
         </div>
 
