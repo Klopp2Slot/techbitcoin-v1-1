@@ -252,7 +252,7 @@ export default async function CoinPage({ params }: { params: { id: string } }) {
 
             <div className="mt-3 rounded-xl border border-white/10 bg-black/30 p-3">
               {spark.d ? (
-                <svg viewBox="0 0 100 30" className="w-full h-28">
+                <svg viewBox="0 0 100 30" width="100%" height="112" style={{ display: "block" }}>
                   {/* baseline glow */}
                   <path
                     d={spark.d}
