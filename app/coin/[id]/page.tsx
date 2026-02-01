@@ -1,190 +1,306 @@
-import Image from "next/image";
 import Link from "next/link";
-import Sparkline from "../../_components/Sparkline";
-import StatusUpdates from "../../_components/StatusUpdates";
 import { formatNumber, formatPct, formatUsd, formatUsdCompact } from "../../_lib/format";
+
+type CoinLinks = {
+  homepage?: string[];
+  subreddit_url?: string | null;
+  blockchain_site?: string[];
+  repos_url?: { github?: string[] };
+  twitter_screen_name?: string | null;
+};
+
+type CoinMarketData = {
+  current_price?: { usd?: number };
+  market_cap?: { usd?: number };
+  total_volume?: { usd?: number };
+  fully_diluted_valuation?: { usd?: number };
+  circulating_supply?: number;
+  total_supply?: number;
+  max_supply?: number;
+
+  price_change_percentage_1h_in_currency?: { usd?: number };
+  price_change_percentage_24h?: number;
+  price_change_percentage_7d?: number;
+
+  ath?: { usd?: number };
+  ath_date?: { usd?: string };
+  atl?: { usd?: number };
+  atl_date?: { usd?: string };
+};
 
 type Coin = {
   id: string;
-  symbol: string;
   name: string;
+  symbol: string;
+  image?: { small?: string };
+  market_cap_rank?: number;
   categories?: string[];
-  image: { small: string; thumb: string; large: string };
-  links?: {
-    homepage?: string[];
-    blockchain_site?: string[];
-    subreddit_url?: string;
-    twitter_screen_name?: string;
-    repos_url?: { github?: string[] };
-  };
-  market_data: {
-    current_price: { usd: number };
-    market_cap_rank: number;
-    market_cap: { usd: number };
-    fully_diluted_valuation?: { usd: number | null };
-    total_volume: { usd: number };
-    circulating_supply?: number | null;
-    total_supply?: number | null;
-    max_supply?: number | null;
-
-    ath: { usd: number };
-    ath_date: { usd: string };
-    ath_change_percentage: { usd: number };
-
-    atl: { usd: number };
-    atl_date: { usd: string };
-    atl_change_percentage: { usd: number };
-
-    price_change_percentage_1h_in_currency?: { usd: number | null };
-    price_change_percentage_24h_in_currency?: { usd: number | null };
-    price_change_percentage_7d_in_currency?: { usd: number | null };
-  };
+  links?: CoinLinks;
+  market_data?: CoinMarketData;
 };
 
-async function getCoin(id: string) {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? ""}/api/coin/${id}`, { cache: "no-store" });
-  return res.json() as Promise<{ data: Coin; stale: boolean; fetchedAt: string }>;
+type StatusUpdate = {
+  description?: string;
+  category?: string;
+  created_at?: string;
+  user?: string;
+  user_title?: string;
+};
+
+function safeFirst<T>(arr?: T[] | null): T | undefined {
+  if (!arr || arr.length === 0) return undefined;
+  return arr[0];
 }
 
-async function getChart(id: string) {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? ""}/api/coin/${id}/chart?days=7`, { cache: "no-store" });
-  return res.json() as Promise<{ data: { prices: [number, number][] }; stale: boolean; fetchedAt: string }>;
+function safeDate(iso?: string) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString();
 }
 
-function firstNonEmpty(arr?: (string | null | undefined)[]) {
-  if (!arr) return null;
-  for (const x of arr) {
-    if (x && x.trim()) return x.trim();
-  }
-  return null;
+function pctClass(v?: number) {
+  if (typeof v !== "number") return "text-gray-400";
+  return v >= 0 ? "text-green-400" : "text-red-400";
+}
+
+async function fetchCoin(id: string): Promise<Coin | null> {
+  const url = `https://api.coingecko.com/api/v3/coins/${encodeURIComponent(
+    id
+  )}?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false&sparkline=false`;
+
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) return null;
+  return (await res.json()) as Coin;
+}
+
+async function fetchStatusUpdates(id: string): Promise<StatusUpdate[]> {
+  // CoinGecko provides status updates via: /coins/{id}/status_updates
+  const url = `https://api.coingecko.com/api/v3/coins/${encodeURIComponent(
+    id
+  )}/status_updates?per_page=10&page=1`;
+
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) return [];
+  const json = await res.json();
+  return (json?.status_updates ?? []) as StatusUpdate[];
 }
 
 export default async function CoinPage({ params }: { params: { id: string } }) {
-  const id = params.id;
-  const [coinPayload, chartPayload] = await Promise.all([getCoin(id), getChart(id)]);
+  const id = params?.id;
 
-  const coin = coinPayload.data;
-  const prices = chartPayload?.data?.prices?.map((p) => p[1]) ?? [];
+  if (!id) {
+    return (
+      <div className="p-6">
+        <h1 className="text-xl font-semibold">Coin not found</h1>
+        <p className="text-gray-400 mt-2">Missing coin id in the URL.</p>
+        <Link href="/" className="text-green-400 underline mt-4 inline-block">
+          ← Back to markets
+        </Link>
+      </div>
+    );
+  }
 
-  const p1 = formatPct(coin.market_data.price_change_percentage_1h_in_currency?.usd ?? null);
-  const p24 = formatPct(coin.market_data.price_change_percentage_24h_in_currency?.usd ?? null);
-  const p7 = formatPct(coin.market_data.price_change_percentage_7d_in_currency?.usd ?? null);
+  const [coin, updates] = await Promise.all([fetchCoin(id), fetchStatusUpdates(id)]);
 
-  const athDate = coin.market_data.ath_date?.usd ? new Date(coin.market_data.ath_date.usd).toLocaleDateString() : "—";
-  const atlDate = coin.market_data.atl_date?.usd ? new Date(coin.market_data.atl_date.usd).toLocaleDateString() : "—";
+  if (!coin || !coin.market_data) {
+    return (
+      <div className="p-6">
+        <h1 className="text-xl font-semibold">Coin data unavailable</h1>
+        <p className="text-gray-400 mt-2">
+          This asset didn’t return full market data from CoinGecko right now.
+        </p>
+        <Link href="/" className="text-green-400 underline mt-4 inline-block">
+          ← Back to markets
+        </Link>
+      </div>
+    );
+  }
 
-  const homepage = firstNonEmpty(coin.links?.homepage);
-  const explorer = firstNonEmpty(coin.links?.blockchain_site);
-  const twitter = coin.links?.twitter_screen_name ? `https://twitter.com/${coin.links.twitter_screen_name}` : null;
-  const reddit = coin.links?.subreddit_url || null;
-  const github = firstNonEmpty(coin.links?.repos_url?.github);
+  const md = coin.market_data;
+  const website = safeFirst(coin.links?.homepage);
+  const explorer = safeFirst(coin.links?.blockchain_site?.filter(Boolean) as string[] | undefined);
+  const reddit = coin.links?.subreddit_url ?? undefined;
+  const github = safeFirst(coin.links?.repos_url?.github);
+  const twitter =
+    coin.links?.twitter_screen_name
+      ? `https://x.com/${coin.links.twitter_screen_name}`
+      : undefined;
+
+  const p1h = md.price_change_percentage_1h_in_currency?.usd;
+  const p24h = md.price_change_percentage_24h;
+  const p7d = md.price_change_percentage_7d;
 
   return (
-    <main className="container">
-      <div className="hero" style={{ paddingBottom: 10 }}>
-        <h1 className="title" style={{ fontSize: 44, marginBottom: 6 }}>
-          <Link href="/">TechBitcoin</Link>
-        </h1>
-        <p className="subtitle" style={{ marginTop: 0 }}>Coin detail</p>
+    <div className="p-6 max-w-5xl mx-auto">
+      <div className="flex items-center justify-between">
+        <Link href="/" className="text-green-400 underline">
+          ← Back to markets
+        </Link>
       </div>
 
-      <div className="card">
-        <div className="toolbar">
-          <div className="coin">
-            <Image src={coin.image.small} alt={`${coin.name} logo`} width={28} height={28} />
-            <div>
-              <div style={{ fontWeight: 800, fontSize: 18 }}>
-                {coin.name} <span style={{ color: "rgba(233,233,233,0.65)" }}>({coin.symbol.toUpperCase()})</span>
-              </div>
-              <div className="small">
-                Rank #{coin.market_data.market_cap_rank ?? "—"} · Updated {new Date(coinPayload.fetchedAt).toLocaleTimeString()}
-                {coinPayload.stale || chartPayload.stale ? " (delayed)" : ""}
-              </div>
-              {coin.categories && coin.categories.length > 0 && (
-                <div className="small" style={{ marginTop: 4, color: "rgba(233,233,233,0.7)" }}>
-                  Categories: {coin.categories.slice(0, 5).join(" · ")}
-                </div>
-              )}
+      <div className="mt-5 flex items-center gap-3">
+        {coin.image?.small ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={coin.image.small} alt={`${coin.name} logo`} className="w-8 h-8 rounded-full" />
+        ) : null}
+        <h1 className="text-3xl font-bold">
+          {coin.name} <span className="text-gray-400">({coin.symbol?.toUpperCase()})</span>
+        </h1>
+      </div>
+
+      <div className="mt-2 text-gray-400">
+        Rank: <span className="text-gray-200">#{coin.market_cap_rank ?? "—"}</span>
+      </div>
+
+      <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="rounded-xl border border-white/10 p-4">
+          <div className="text-gray-400 text-sm">Price</div>
+          <div className="text-2xl font-semibold">{formatUsd(md.current_price?.usd)}</div>
+          <div className="mt-2 flex gap-4 text-sm">
+            <span className={pctClass(p1h)}>1h: {formatPct(p1h)}</span>
+            <span className={pctClass(p24h)}>24h: {formatPct(p24h)}</span>
+            <span className={pctClass(p7d)}>7d: {formatPct(p7d)}</span>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-white/10 p-4">
+          <div className="text-gray-400 text-sm">Market overview</div>
+          <div className="mt-2 grid grid-cols-1 gap-2 text-sm">
+            <div className="flex justify-between">
+              <span className="text-gray-400">Market cap</span>
+              <span>{formatUsdCompact(md.market_cap?.usd)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">24h volume</span>
+              <span>{formatUsdCompact(md.total_volume?.usd)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">FDV</span>
+              <span>{formatUsdCompact(md.fully_diluted_valuation?.usd)}</span>
             </div>
           </div>
-          <div className="small"><Link href="/">← Back to markets</Link></div>
         </div>
 
-        <div className="kv">
-          <div className="item">
-            <div className="k">Price</div>
-            <div className="v">{formatUsd(coin.market_data.current_price.usd)}</div>
-          </div>
-          <div className="item">
-            <div className="k">1h</div>
-            <div className={`v ${p1.cls}`}>{p1.text}</div>
-          </div>
-          <div className="item">
-            <div className="k">24h</div>
-            <div className={`v ${p24.cls}`}>{p24.text}</div>
-          </div>
-          <div className="item">
-            <div className="k">7d</div>
-            <div className={`v ${p7.cls}`}>{p7.text}</div>
-          </div>
-          <div className="item">
-            <div className="k">Market cap</div>
-            <div className="v">{formatUsdCompact(coin.market_data.market_cap.usd)}</div>
-          </div>
-          <div className="item">
-            <div className="k">FDV</div>
-            <div className="v">{formatUsdCompact(coin.market_data.fully_diluted_valuation?.usd ?? null)}</div>
-          </div>
-          <div className="item">
-            <div className="k">24h volume</div>
-            <div className="v">{formatUsdCompact(coin.market_data.total_volume.usd)}</div>
-          </div>
-          <div className="item">
-            <div className="k">Circulating</div>
-            <div className="v">{formatNumber(coin.market_data.circulating_supply ?? null)}</div>
-          </div>
-          <div className="item">
-            <div className="k">Total supply</div>
-            <div className="v">{formatNumber(coin.market_data.total_supply ?? null)}</div>
-          </div>
-          <div className="item">
-            <div className="k">Max supply</div>
-            <div className="v">{formatNumber(coin.market_data.max_supply ?? null)}</div>
-          </div>
-          <div className="item">
-            <div className="k">ATH</div>
-            <div className="v">{formatUsd(coin.market_data.ath.usd)} <span className="small">({athDate})</span></div>
-          </div>
-          <div className="item">
-            <div className="k">ATL</div>
-            <div className="v">{formatUsd(coin.market_data.atl.usd)} <span className="small">({atlDate})</span></div>
+        <div className="rounded-xl border border-white/10 p-4">
+          <div className="text-gray-400 text-sm">Supply</div>
+          <div className="mt-2 grid grid-cols-1 gap-2 text-sm">
+            <div className="flex justify-between">
+              <span className="text-gray-400">Circulating</span>
+              <span>{formatNumber(md.circulating_supply)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">Total</span>
+              <span>{formatNumber(md.total_supply)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">Max</span>
+              <span>{formatNumber(md.max_supply)}</span>
+            </div>
           </div>
         </div>
 
-        <div className="chart">
-          <Sparkline prices={prices} />
-        </div>
-
-        <div style={{ padding: "0 14px 14px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-          <div className="small" style={{ margin: "12px 0 8px", color: "rgba(233,233,233,0.75)" }}>Links</div>
-          <div className="small" style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            {homepage && <a href={homepage} target="_blank" rel="noreferrer">Website</a>}
-            {explorer && <a href={explorer} target="_blank" rel="noreferrer">Explorer</a>}
-            {twitter && <a href={twitter} target="_blank" rel="noreferrer">X / Twitter</a>}
-            {reddit && <a href={reddit} target="_blank" rel="noreferrer">Reddit</a>}
-            {github && <a href={github} target="_blank" rel="noreferrer">GitHub</a>}
-            {(!homepage && !explorer && !twitter && !reddit && !github) && <span>No links available.</span>}
+        <div className="rounded-xl border border-white/10 p-4">
+          <div className="text-gray-400 text-sm">All-time stats</div>
+          <div className="mt-2 grid grid-cols-1 gap-2 text-sm">
+            <div className="flex justify-between">
+              <span className="text-gray-400">ATH</span>
+              <span>
+                {formatUsd(md.ath?.usd)}{" "}
+                <span className="text-gray-500">({safeDate(md.ath_date?.usd)})</span>
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">ATL</span>
+              <span>
+                {formatUsd(md.atl?.usd)}{" "}
+                <span className="text-gray-500">({safeDate(md.atl_date?.usd)})</span>
+              </span>
+            </div>
           </div>
-        </div>
-
-        <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-          <StatusUpdates coinId={coin.id} />
         </div>
       </div>
 
-      <div className="footer">
-        Data source: CoinGecko. Informational only.
+      {/* Categories */}
+      {coin.categories && coin.categories.length > 0 ? (
+        <div className="mt-6">
+          <div className="text-gray-400 text-sm mb-2">Categories</div>
+          <div className="flex flex-wrap gap-2">
+            {coin.categories.slice(0, 12).map((c) => (
+              <span
+                key={c}
+                className="text-xs rounded-full border border-white/10 px-3 py-1 text-gray-200"
+              >
+                {c}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {/* Links */}
+      <div className="mt-8 rounded-xl border border-white/10 p-4">
+        <div className="text-gray-400 text-sm mb-3">Official links</div>
+        <div className="flex flex-wrap gap-3 text-sm">
+          {website ? (
+            <a className="text-green-400 underline" href={website} target="_blank" rel="noreferrer">
+              Website
+            </a>
+          ) : null}
+          {explorer ? (
+            <a className="text-green-400 underline" href={explorer} target="_blank" rel="noreferrer">
+              Explorer
+            </a>
+          ) : null}
+          {twitter ? (
+            <a className="text-green-400 underline" href={twitter} target="_blank" rel="noreferrer">
+              X / Twitter
+            </a>
+          ) : null}
+          {reddit ? (
+            <a className="text-green-400 underline" href={reddit} target="_blank" rel="noreferrer">
+              Reddit
+            </a>
+          ) : null}
+          {github ? (
+            <a className="text-green-400 underline" href={github} target="_blank" rel="noreferrer">
+              GitHub
+            </a>
+          ) : null}
+          {!website && !explorer && !twitter && !reddit && !github ? (
+            <span className="text-gray-500">No public links available.</span>
+          ) : null}
+        </div>
       </div>
-    </main>
+
+      {/* Updates / News */}
+      <div className="mt-8 rounded-xl border border-white/10 p-4">
+        <div className="text-gray-400 text-sm mb-3">Updates</div>
+        {updates.length === 0 ? (
+          <div className="text-gray-500 text-sm">No recent updates available.</div>
+        ) : (
+          <ul className="space-y-3">
+            {updates.slice(0, 6).map((u, idx) => (
+              <li key={idx} className="text-sm">
+                <div className="text-gray-300">
+                  <span className="text-gray-500">
+                    {u.created_at ? new Date(u.created_at).toLocaleString() : "—"}
+                  </span>
+                  {u.category ? <span className="text-gray-500"> • {u.category}</span> : null}
+                </div>
+                <div className="text-gray-200 mt-1">
+                  {(u.description ?? "").slice(0, 260)}
+                  {(u.description ?? "").length > 260 ? "…" : ""}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="mt-10 text-xs text-gray-500">
+        Data source: CoinGecko (public endpoints)
+      </div>
+    </div>
   );
 }
