@@ -51,6 +51,13 @@ type MarketChart = {
   prices?: Array<[number, number]>; // [timestamp, price]
 };
 
+type RedditPost = {
+  title: string;
+  url: string;
+  updated?: string;
+  sourceLabel: string;
+};
+
 function safeFirst<T>(arr?: T[] | null): T | undefined {
   if (!arr || arr.length === 0) return undefined;
   return arr[0];
@@ -63,13 +70,16 @@ function safeDate(iso?: string) {
   return d.toLocaleDateString();
 }
 
+function safeDateTime(iso?: string) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString();
+}
+
 function pctClass(v?: number) {
   if (typeof v !== "number") return "text-gray-300/80";
   return v >= 0 ? "text-emerald-200" : "text-rose-200";
-}
-
-function clampNumber(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
 }
 
 function buildSparklinePath(values: number[], w = 100, h = 30, pad = 2) {
@@ -114,7 +124,6 @@ async function fetchStatusUpdates(id: string): Promise<StatusUpdate[]> {
 }
 
 async function fetchMarketChart24h(id: string): Promise<MarketChart | null> {
-  // 24h chart: days=1. CoinGecko returns points across the day.
   const url = `https://api.coingecko.com/api/v3/coins/${encodeURIComponent(
     id
   )}/market_chart?vs_currency=usd&days=1`;
@@ -122,6 +131,144 @@ async function fetchMarketChart24h(id: string): Promise<MarketChart | null> {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) return null;
   return (await res.json()) as MarketChart;
+}
+
+/**
+ * Reddit RSS (Atom) parsing without extra libraries.
+ * Reddit returns Atom feeds with <entry> nodes.
+ */
+function decodeHtmlEntities(s: string) {
+  return s
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'");
+}
+
+function pickSubredditForCoin(coinId: string, symbol: string, name: string): string | null {
+  const key = (coinId || "").toLowerCase();
+  const sym = (symbol || "").toLowerCase();
+  const nm = (name || "").toLowerCase();
+
+  // Common, high-signal mappings (MVP)
+  const map: Record<string, string> = {
+    bitcoin: "Bitcoin",
+    ethereum: "ethereum",
+    tether: "Tether",
+    "usd-coin": "USDC",
+    binancecoin: "binance",
+    solana: "solana",
+    ripple: "Ripple",
+    cardano: "cardano",
+    dogecoin: "dogecoin",
+    tron: "Tronix",
+    polkadot: "dot",
+    chainlink: "Chainlink",
+    avalanche: "Avax",
+    "the-open-network": "TONcoin",
+    toncoin: "TONcoin",
+    stellar: "Stellar",
+    monero: "Monero",
+    litecoin: "litecoin",
+    uniswap: "UniSwap",
+    aave: "aave_official",
+    maker: "MakerDAO",
+    cosmos: "cosmosnetwork",
+    filecoin: "filecoin",
+    near: "nearprotocol",
+    aptos: "aptos",
+    arbitrum: "arbitrum",
+    optimism: "Optimism",
+    sui: "Sui",
+    pepe: "pepecoin",
+    shiba: "SHIBArmy",
+  };
+
+  if (map[key]) return map[key];
+  if (map[sym]) return map[sym];
+
+  // Heuristic: if name is very distinctive, try it as subreddit (not guaranteed).
+  // We keep this conservative and fall back to search otherwise.
+  if (nm.length >= 4 && nm.length <= 18 && /^[a-z0-9\- ]+$/.test(nm)) {
+    // don't try generic words
+    const generic = new Set(["usd", "coin", "token", "network", "protocol", "cash"]);
+    if (!generic.has(nm)) return null;
+  }
+
+  return null;
+}
+
+async function fetchRedditPosts(coinId: string, symbol: string, name: string, limit = 10): Promise<RedditPost[]> {
+  const subreddit = pickSubredditForCoin(coinId, symbol, name);
+
+  const urls: Array<{ url: string; label: string }> = [];
+
+  if (subreddit) {
+    // "new" feed for subreddit
+    urls.push({
+      url: `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/new/.rss`,
+      label: `r/${subreddit}`,
+    });
+  }
+
+  // Fallback / additional signal: sitewide search RSS
+  const q = `${name} OR ${symbol.toUpperCase()}`;
+  urls.push({
+    url: `https://www.reddit.com/search.rss?q=${encodeURIComponent(q)}&sort=new&t=day`,
+    label: "Reddit search (24h)",
+  });
+
+  // Try each source until we get enough posts
+  const posts: RedditPost[] = [];
+
+  for (const src of urls) {
+    if (posts.length >= limit) break;
+
+    const res = await fetch(src.url, {
+      cache: "no-store",
+      headers: {
+        // Reddit prefers a user-agent
+        "User-Agent": "techbitcoin/1.0 (RSS reader; contact: techbitcoin.com)",
+        "Accept": "application/atom+xml,application/xml,text/xml,*/*",
+      },
+    });
+
+    if (!res.ok) continue;
+
+    const xml = await res.text();
+
+    // Split by <entry> … </entry>
+    const entryRegex = /<entry\b[\s\S]*?<\/entry>/g;
+    const entries = xml.match(entryRegex) ?? [];
+
+    for (const entry of entries) {
+      if (posts.length >= limit) break;
+
+      // title
+      const titleMatch = entry.match(/<title>([\s\S]*?)<\/title>/);
+      const rawTitle = titleMatch?.[1]?.trim() ?? "";
+      const title = decodeHtmlEntities(rawTitle.replaceAll("\n", " ").replace(/\s+/g, " "));
+
+      // updated
+      const updatedMatch = entry.match(/<updated>([\s\S]*?)<\/updated>/);
+      const updated = updatedMatch?.[1]?.trim();
+
+      // link (atom uses <link rel="alternate" href="..."/>)
+      const linkMatch = entry.match(/<link[^>]*?rel="alternate"[^>]*?href="([^"]+)"[^>]*\/?>/);
+      const url = decodeHtmlEntities(linkMatch?.[1] ?? "");
+
+      // Skip empties
+      if (!title || !url) continue;
+
+      // Avoid duplicates
+      if (posts.some((p) => p.url === url)) continue;
+
+      posts.push({ title, url, updated, sourceLabel: src.label });
+    }
+  }
+
+  return posts.slice(0, limit);
 }
 
 export default async function CoinPage({ params }: { params: { id: string } }) {
@@ -159,6 +306,9 @@ export default async function CoinPage({ params }: { params: { id: string } }) {
     );
   }
 
+  // Fetch Reddit posts after we have coin name/symbol
+  const redditPosts = await fetchRedditPosts(coin.id, coin.symbol, coin.name, 10);
+
   const md = coin.market_data;
   const website = safeFirst(coin.links?.homepage);
   const explorer = safeFirst((coin.links?.blockchain_site?.filter(Boolean) as string[] | undefined) ?? []);
@@ -179,7 +329,6 @@ export default async function CoinPage({ params }: { params: { id: string } }) {
   const min24h = sampled.length ? Math.min(...sampled) : undefined;
   const max24h = sampled.length ? Math.max(...sampled) : undefined;
 
-  // A soft “trend” tint: greenish if up on 24h, pinkish if down.
   const trendUp = typeof p24h === "number" ? p24h >= 0 : true;
 
   return (
@@ -199,15 +348,17 @@ export default async function CoinPage({ params }: { params: { id: string } }) {
           <div className="mt-4 flex items-center gap-3">
             {coin.image?.small ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={coin.image.small} alt={`${coin.name} logo`} className="w-10 h-10 rounded-full ring-2 ring-white/60" />
+              <img
+                src={coin.image.small}
+                alt={`${coin.name} logo`}
+                className="w-10 h-10 rounded-full ring-2 ring-white/60"
+              />
             ) : null}
             <div>
               <h1 className="text-3xl font-extrabold text-black">
                 {coin.name} <span className="text-black/70">({coin.symbol?.toUpperCase()})</span>
               </h1>
-              <div className="text-black/70 text-sm">
-                Live 24h view • Data: CoinGecko
-              </div>
+              <div className="text-black/70 text-sm">Live 24h view • Data: CoinGecko</div>
             </div>
           </div>
         </div>
@@ -229,8 +380,7 @@ export default async function CoinPage({ params }: { params: { id: string } }) {
 
             <div className="mt-4 text-xs text-gray-400">
               24h Low/High:{" "}
-              <span className="text-gray-200">{formatUsd(min24h)}</span>{" "}
-              /{" "}
+              <span className="text-gray-200">{formatUsd(min24h)}</span> /{" "}
               <span className="text-gray-200">{formatUsd(max24h)}</span>
             </div>
           </div>
@@ -253,7 +403,7 @@ export default async function CoinPage({ params }: { params: { id: string } }) {
             <div className="mt-3 rounded-xl border border-white/10 bg-black/30 p-3">
               {spark.d ? (
                 <svg viewBox="0 0 100 30" width="100%" height="112" style={{ display: "block" }}>
-                  {/* baseline glow */}
+                  {/* soft glow */}
                   <path
                     d={spark.d}
                     fill="none"
@@ -276,7 +426,7 @@ export default async function CoinPage({ params }: { params: { id: string } }) {
             </div>
 
             <div className="mt-3 text-xs text-gray-500">
-              Tip: This is a lightweight MVP chart (fast + reliable). We can upgrade to interactive charts later.
+              Lightweight MVP chart (fast + reliable). We can upgrade to interactive charts later.
             </div>
           </div>
         </div>
@@ -306,19 +456,11 @@ export default async function CoinPage({ params }: { params: { id: string } }) {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
               <Row
                 k="ATH"
-                v={
-                  md.ath?.usd
-                    ? `${formatUsd(md.ath?.usd)} (${safeDate(md.ath_date?.usd)})`
-                    : "—"
-                }
+                v={md.ath?.usd ? `${formatUsd(md.ath?.usd)} (${safeDate(md.ath_date?.usd)})` : "—"}
               />
               <Row
                 k="ATL"
-                v={
-                  md.atl?.usd
-                    ? `${formatUsd(md.atl?.usd)} (${safeDate(md.atl_date?.usd)})`
-                    : "—"
-                }
+                v={md.atl?.usd ? `${formatUsd(md.atl?.usd)} (${safeDate(md.atl_date?.usd)})` : "—"}
               />
             </div>
           </div>
@@ -376,7 +518,49 @@ export default async function CoinPage({ params }: { params: { id: string } }) {
           </div>
         </div>
 
-        {/* Updates */}
+        {/* Reddit feed */}
+        <div className="mt-6 rounded-2xl border border-white/10 bg-black/20 backdrop-blur p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div className="text-gray-300 text-sm">Latest from Reddit</div>
+            <a
+              className="text-xs text-amber-200 underline"
+              href={`https://www.reddit.com/search/?q=${encodeURIComponent(coin.name)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View on Reddit
+            </a>
+          </div>
+
+          {redditPosts.length === 0 ? (
+            <div className="text-gray-500 text-sm mt-3">No recent Reddit posts found.</div>
+          ) : (
+            <ul className="mt-3 space-y-3">
+              {redditPosts.slice(0, 10).map((p, idx) => (
+                <li key={idx} className="text-sm">
+                  <div className="flex items-start justify-between gap-4">
+                    <a
+                      href={p.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-gray-100 hover:underline leading-snug"
+                    >
+                      {p.title}
+                    </a>
+                    <span className="text-xs text-gray-500 whitespace-nowrap">
+                      {p.updated ? safeDateTime(p.updated) : "—"}
+                    </span>
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    Source: {p.sourceLabel}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/* Updates (CoinGecko status updates) */}
         <div className="mt-6 rounded-2xl border border-white/10 bg-black/20 backdrop-blur p-5">
           <div className="text-gray-300 text-sm mb-3">Updates</div>
           {updates.length === 0 ? (
@@ -401,9 +585,7 @@ export default async function CoinPage({ params }: { params: { id: string } }) {
           )}
         </div>
 
-        <div className="mt-10 text-xs text-gray-500">
-          Data source: CoinGecko (public endpoints)
-        </div>
+        <div className="mt-10 text-xs text-gray-500">Data sources: CoinGecko + Reddit RSS</div>
       </div>
     </div>
   );
